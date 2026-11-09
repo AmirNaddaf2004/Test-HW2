@@ -10,6 +10,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -51,7 +53,8 @@ class AircraftTest {
         configureAllComponentsReadyForTakeoff();
         aircraft.prepareForTakeoff();
         aircraft.takeOff();
-        reset(engineMock, fuelSystemMock, landingGearMock, navigationSystemMock);
+        // Keep the stubs; only forget setup interactions before the action under test.
+        clearInvocations(engineMock, fuelSystemMock, landingGearMock, navigationSystemMock);
     }
 
     // =========================================================================
@@ -68,6 +71,8 @@ class AircraftTest {
         verify(engineMock, times(1)).isOperational();
         verify(fuelSystemMock, times(1)).hasEnoughFuel();
         verify(navigationSystemMock, times(1)).isRouteAvailable();
+        verifyNoInteractions(landingGearMock);
+        verifyNoMoreInteractions(engineMock, fuelSystemMock, navigationSystemMock);
     }
 
     @Test
@@ -76,7 +81,8 @@ class AircraftTest {
 
         assertThrows(FlightException.class, () -> aircraft.prepareForTakeoff());
         assertEquals(FlightStatus.GROUNDED, aircraft.getStatus());
-        verify(fuelSystemMock, times(0)).hasEnoughFuel();
+        verify(engineMock, times(1)).isOperational();
+        verifyNoInteractions(fuelSystemMock, navigationSystemMock, landingGearMock);
     }
 
     @Test
@@ -87,6 +93,8 @@ class AircraftTest {
         assertThrows(FlightException.class, () -> aircraft.prepareForTakeoff());
         assertEquals(FlightStatus.GROUNDED, aircraft.getStatus());
         verify(navigationSystemMock, times(0)).isRouteAvailable();
+        verifyNoInteractions(navigationSystemMock, landingGearMock);
+        verify(engineMock, never()).start();
     }
 
     @Test
@@ -97,6 +105,8 @@ class AircraftTest {
 
         assertThrows(FlightException.class, () -> aircraft.prepareForTakeoff());
         assertEquals(FlightStatus.GROUNDED, aircraft.getStatus());
+        verifyNoInteractions(landingGearMock);
+        verify(engineMock, never()).start();
     }
 
     @Test
@@ -122,18 +132,22 @@ class AircraftTest {
         assertEquals(FlightStatus.IN_FLIGHT, aircraft.getStatus());
         verify(engineMock, times(1)).start();
         verify(landingGearMock, times(1)).retract();
+        InOrder order = inOrder(engineMock, landingGearMock);
+        order.verify(engineMock).start();
+        order.verify(landingGearMock).retract();
     }
 
     @Test
     void takeOff_WhenEngineStartThrowsException_AbortsFlightAndThrowsFlightException() {
         configureAllComponentsReadyForTakeoff();
         aircraft.prepareForTakeoff();
-        doThrow(new IllegalStateException("The engine is not operational.")).when(engineMock).start();
+        IllegalStateException failure = new IllegalStateException("The engine is not operational.");
+        doThrow(failure).when(engineMock).start();
 
         FlightException thrown = assertThrows(FlightException.class, () -> aircraft.takeOff());
 
         assertEquals(FlightStatus.ABORTED, aircraft.getStatus());
-        assertInstanceOf(IllegalStateException.class, thrown.getCause());
+        assertSame(failure, thrown.getCause());
         verify(landingGearMock, times(0)).retract();
     }
 
@@ -151,8 +165,6 @@ class AircraftTest {
     void cruise_WhenEngineIsOperationalAndFuelSufficient_ConsumesFuelAndStaysInFlight() {
         transitionAircraftToInFlightState();
         when(engineMock.isOperational()).thenReturn(true);
-        doNothing().when(fuelSystemMock).consumeFuel(any(Double.class));
-
         aircraft.cruise(VALID_CRUISE_FUEL_AMOUNT);
         aircraft.cruise(SECOND_CRUISE_FUEL_AMOUNT);
 
@@ -160,6 +172,11 @@ class AircraftTest {
         verify(fuelSystemMock, times(2)).consumeFuel(any(Double.class));
         verify(fuelSystemMock, times(1)).consumeFuel(VALID_CRUISE_FUEL_AMOUNT);
         verify(fuelSystemMock, times(1)).consumeFuel(SECOND_CRUISE_FUEL_AMOUNT);
+        ArgumentCaptor<Double> amounts = ArgumentCaptor.forClass(Double.class);
+        verify(fuelSystemMock, times(2)).consumeFuel(amounts.capture());
+        assertEquals(java.util.List.of(50.0, 30.0), amounts.getAllValues());
+        verifyNoInteractions(landingGearMock, navigationSystemMock);
+        verify(engineMock, never()).stop();
     }
 
     @Test
@@ -173,14 +190,23 @@ class AircraftTest {
         verify(landingGearMock, times(1)).deploy();
         verify(engineMock, times(1)).stop();
         verify(fuelSystemMock, times(0)).consumeFuel(any(Double.class));
+        InOrder order = inOrder(engineMock, landingGearMock);
+        order.verify(engineMock).isOperational();
+        order.verify(landingGearMock).deploy();
+        order.verify(engineMock).stop();
     }
 
     @Test
     void cruise_WhenEngineCheckThrowsRuntimeExceptionInCruise_PropagatesException() {
         transitionAircraftToInFlightState();
-        when(engineMock.isOperational()).thenThrow(new IllegalStateException("Engine sensor hardware fault"));
+        IllegalStateException failure = new IllegalStateException("Engine sensor hardware fault");
+        when(engineMock.isOperational()).thenThrow(failure);
 
-        assertThrows(IllegalStateException.class, () -> aircraft.cruise(VALID_CRUISE_FUEL_AMOUNT));
+        assertSame(failure,
+                assertThrows(IllegalStateException.class, () -> aircraft.cruise(VALID_CRUISE_FUEL_AMOUNT)));
+        assertEquals(FlightStatus.IN_FLIGHT, aircraft.getStatus());
+        verifyNoInteractions(landingGearMock);
+        verify(engineMock, never()).stop();
         verify(fuelSystemMock, times(0)).consumeFuel(any(Double.class));
     }
 
@@ -188,23 +214,31 @@ class AircraftTest {
     void cruise_WhenFuelConsumptionThrowsException_PerformsEmergencyLandingAndThrowsFlightException() {
         transitionAircraftToInFlightState();
         when(engineMock.isOperational()).thenReturn(true);
-        doThrow(new IllegalStateException("Not enough fuel."))
+        IllegalStateException failure = new IllegalStateException("Not enough fuel.");
+        doThrow(failure)
                 .when(fuelSystemMock).consumeFuel(any(Double.class));
 
-        assertThrows(FlightException.class, () -> aircraft.cruise(VALID_CRUISE_FUEL_AMOUNT));
+        FlightException thrown = assertThrows(FlightException.class,
+                () -> aircraft.cruise(VALID_CRUISE_FUEL_AMOUNT));
+        assertSame(failure, thrown.getCause());
 
         assertEquals(FlightStatus.LANDED, aircraft.getStatus());
         verify(landingGearMock, times(1)).deploy();
         verify(engineMock, times(1)).stop();
+        InOrder order = inOrder(fuelSystemMock, landingGearMock, engineMock);
+        order.verify(fuelSystemMock).consumeFuel(VALID_CRUISE_FUEL_AMOUNT);
+        order.verify(landingGearMock).deploy();
+        order.verify(engineMock).stop();
     }
 
     @ParameterizedTest
-    @ValueSource(doubles = {0.0, -10.5})
+    @ValueSource(doubles = {0.0, -0.0, -Double.MIN_VALUE, -10.5})
     void cruise_WhenFuelAmountIsNonPositive_ThrowsIllegalArgumentException(double invalidFuelAmount) {
         transitionAircraftToInFlightState();
 
         assertThrows(IllegalArgumentException.class, () -> aircraft.cruise(invalidFuelAmount));
-        verify(fuelSystemMock, times(0)).consumeFuel(any(Double.class));
+        assertEquals(FlightStatus.IN_FLIGHT, aircraft.getStatus());
+        verifyNoInteractions(engineMock, fuelSystemMock, landingGearMock, navigationSystemMock);
     }
 
     // =========================================================================
@@ -220,6 +254,11 @@ class AircraftTest {
         assertEquals(FlightStatus.LANDED, aircraft.getStatus());
         verify(landingGearMock, times(1)).deploy();
         verify(engineMock, times(1)).stop();
+        InOrder order = inOrder(landingGearMock, engineMock);
+        order.verify(landingGearMock).deploy();
+        order.verify(engineMock).stop();
+        verifyNoMoreInteractions(landingGearMock, engineMock);
+        verifyNoInteractions(fuelSystemMock, navigationSystemMock);
     }
 
     @Test
@@ -233,5 +272,74 @@ class AircraftTest {
 
         assertEquals(FlightStatus.READY, aircraft.getStatus());
         verify(engineMock, times(1)).isOperational();
+    }
+
+    @Test
+    void takeOff_WhenGearRetractionFails_AbortsAndPreservesCause() {
+        configureAllComponentsReadyForTakeoff();
+        aircraft.prepareForTakeoff();
+        IllegalStateException failure = new IllegalStateException("Gear is jammed");
+        doThrow(failure).when(landingGearMock).retract();
+
+        FlightException thrown = assertThrows(FlightException.class, aircraft::takeOff);
+
+        assertSame(failure, thrown.getCause());
+        assertEquals(FlightStatus.ABORTED, aircraft.getStatus());
+        InOrder order = inOrder(engineMock, landingGearMock);
+        order.verify(engineMock).start();
+        order.verify(landingGearMock).retract();
+    }
+
+    @Test
+    void emergencyLand_WhenInFlight_DeploysGearBeforeStoppingEngine() {
+        transitionAircraftToInFlightState();
+
+        aircraft.emergencyLand();
+
+        assertEquals(FlightStatus.LANDED, aircraft.getStatus());
+        InOrder order = inOrder(landingGearMock, engineMock);
+        order.verify(landingGearMock).deploy();
+        order.verify(engineMock).stop();
+        verifyNoMoreInteractions(landingGearMock, engineMock);
+        verifyNoInteractions(fuelSystemMock, navigationSystemMock);
+    }
+
+    @Test
+    void cruise_WhenEngineFailsAfterOneSuccessfulCruise_LandsWithoutConsumingMoreFuel() {
+        transitionAircraftToInFlightState();
+        when(engineMock.isOperational()).thenReturn(true, false);
+
+        aircraft.cruise(50.0);
+        assertEquals(FlightStatus.IN_FLIGHT, aircraft.getStatus());
+        aircraft.cruise(30.0);
+
+        assertEquals(FlightStatus.LANDED, aircraft.getStatus());
+        verify(engineMock, times(2)).isOperational();
+        verify(fuelSystemMock).consumeFuel(50.0);
+        verifyNoMoreInteractions(fuelSystemMock);
+        verify(landingGearMock).deploy();
+        verify(engineMock).stop();
+    }
+
+    @Test
+    void reset_RemovesStubsAndInteractionsBeforeReconfiguringTheSameMock() {
+        when(engineMock.isOperational()).thenReturn(true);
+        assertTrue(engineMock.isOperational());
+        engineMock.start();
+
+        // reset() removes both stubbing and invocation history, unlike clearInvocations().
+        reset(engineMock);
+        verifyNoInteractions(engineMock);
+        assertFalse(engineMock.isOperational());
+        when(engineMock.isOperational()).thenReturn(true);
+        when(fuelSystemMock.hasEnoughFuel()).thenReturn(true);
+        when(navigationSystemMock.isRouteAvailable()).thenReturn(true);
+        clearInvocations(engineMock);
+
+        aircraft.prepareForTakeoff();
+
+        assertEquals(FlightStatus.READY, aircraft.getStatus());
+        verify(engineMock, times(1)).isOperational();
+        verify(engineMock, never()).start();
     }
 }
