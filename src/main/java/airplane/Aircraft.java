@@ -63,8 +63,8 @@ public class Aircraft {
     public void cruise(double fuelAmount) {
         ensureStatusIs(FlightStatus.IN_FLIGHT);
 
-        if (fuelAmount <= 0) {
-            throw new IllegalArgumentException("Fuel amount must be greater than zero.");
+        if (!Double.isFinite(fuelAmount) || fuelAmount <= 0) {
+            throw new IllegalArgumentException("Fuel amount must be finite and greater than zero.");
         }
 
         if (!engine.isOperational()) {

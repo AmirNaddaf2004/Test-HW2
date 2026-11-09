@@ -232,8 +232,9 @@ class AircraftTest {
     }
 
     @ParameterizedTest
-    @ValueSource(doubles = {0.0, -0.0, -Double.MIN_VALUE, -10.5})
-    void cruise_WhenFuelAmountIsNonPositive_ThrowsIllegalArgumentException(double invalidFuelAmount) {
+    @ValueSource(doubles = {0.0, -0.0, -Double.MIN_VALUE, -10.5, Double.NaN,
+            Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY})
+    void cruise_WhenFuelAmountIsInvalid_ThrowsIllegalArgumentException(double invalidFuelAmount) {
         transitionAircraftToInFlightState();
 
         assertThrows(IllegalArgumentException.class, () -> aircraft.cruise(invalidFuelAmount));
