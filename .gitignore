@@ -24,3 +24,7 @@ hs_err_pid*
 replay_pid*
 .idea/
 *.iml
+
+# Maven output and local inspection files
+/target/
+/tmp/
